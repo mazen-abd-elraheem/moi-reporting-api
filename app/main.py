@@ -2,19 +2,18 @@ from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from sqlalchemy import text
 import logging
 
 from app.core.config import get_settings
-from app.core.database import engine, Base
+from app.core.database import engine  # This must be an async engine
 
-# Import routers (will be created in next phase)
-# from app.api.v1 import reports, users, auth
-
+# Load settings
 settings = get_settings()
 
-# Configure logging
+# Configure structured logging
 logging.basicConfig(
-    level=logging.INFO if not settings.DEBUG else logging.DEBUG,
+    level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -22,38 +21,39 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan events"""
-    # Startup
-    logger.info(f"Starting {settings.APP_NAME} - {settings.ENVIRONMENT}")
-    logger.info("Verifying database connection...")
-    
+    """Handle application startup and shutdown events."""
+    # === Startup ===
+    logger.info(f"Starting {settings.APP_NAME} in {settings.ENVIRONMENT} environment")
+    logger.info("Verifying async database connection...")
+
     try:
-        # Test database connection
-        with engine.connect() as conn:
-            logger.info("✓ Database connection successful")
+        # Test async connection to Azure SQL
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))  # Lightweight ping
+        logger.info("✓ Async database connection successful")
     except Exception as e:
-        logger.error(f"✗ Database connection failed: {str(e)}")
-        raise
-    
-    yield
-    
-    # Shutdown
+        logger.critical(f"✗ Failed to connect to database: {e}", exc_info=True)
+        raise SystemExit("Database connection failed. Shutting down.")
+
+    yield  # App runs here
+
+    # === Shutdown ===
     logger.info("Shutting down application...")
-    engine.dispose()
+    await engine.dispose()  # Properly close async engine
 
 
 # Initialize FastAPI app
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.API_VERSION,
-    description="API for MoI Digital Reporting System",
+    description="MVP API for MoI Digital Reporting System — Secure citizen incident reporting",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json"
 )
 
-# CORS middleware
+# Configure CORS (from settings, e.g., Flutter Web or Mobile domains)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
@@ -63,10 +63,11 @@ app.add_middleware(
 )
 
 
-# Health check endpoint
-@app.get("/health", status_code=status.HTTP_200_OK)
+# === Endpoints ===
+
+@app.get("/health", status_code=status.HTTP_200_OK, include_in_schema=False)
 async def health_check():
-    """Health check endpoint"""
+    """Lightweight health check for load balancers and monitoring."""
     return {
         "status": "healthy",
         "service": settings.APP_NAME,
@@ -75,42 +76,38 @@ async def health_check():
     }
 
 
-# Root endpoint
-@app.get("/")
+@app.get("/", include_in_schema=False)
 async def root():
-    """Root endpoint"""
+    """Root redirect to API documentation."""
     return {
-        "message": "MoI Digital Reporting System API",
+        "message": "Welcome to the MoI Digital Reporting System API",
         "version": settings.API_VERSION,
         "docs": "/api/docs"
     }
 
 
-# Include routers (to be added in next phase)
-# app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
-# app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
-# app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])
+# === Exception Handling ===
 
-
-# Global exception handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    """Global exception handler"""
+    """Catch unhandled exceptions and log them securely."""
     logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "detail": "Internal server error",
-            "message": str(exc) if settings.DEBUG else "An error occurred"
+            "message": str(exc) if settings.DEBUG else "An unexpected error occurred"
         }
     )
 
 
+# === Development server ===
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=settings.DEBUG
+        reload=settings.DEBUG,
+        log_level="info"
     )
